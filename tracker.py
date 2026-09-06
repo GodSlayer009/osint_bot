@@ -1,3 +1,5 @@
+"""MongoDB persistence helpers for the Telegram bot."""
+
 from __future__ import annotations
 
 from datetime import datetime, timezone

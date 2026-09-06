@@ -77,7 +77,7 @@ def admin_user_ids() -> frozenset[int]:
 
 
 ADMIN_USER_IDS = admin_user_ids()
-BOT_USERNAME = os.getenv("BOT_USERNAME", "OsintYutaBot").lstrip("@")
+BOT_USERNAME = os.getenv("BOT_USERNAME", "Shr_number_information_2_bot").lstrip("@")
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 
 app = Client(
@@ -88,7 +88,7 @@ app = Client(
 )
 
 WELCOME_TEXT = (
-        "<b>🕵️‍♂️ OSINT Bot</b>\n\n"
+        "<b>🕵️‍♂️ Yuta OSINT Bot</b>\n\n"
         "I can help you find information using osint commands.\n\n"
 
         "<b>💳 Credit:</b> {credits}\n\n"
@@ -96,6 +96,7 @@ WELCOME_TEXT = (
         "── ── ── ── ── ── ── ── ── ── ── ── ── ── ──\n"
         "<b>🛠 Available Commands:</b>\n\n"
         "<code>/num number</code> - get number information\n"
+        "<code>/aadhar number</code> - get Aadhaar information\n"
         "<code>/refer</code> - get your referral link and rewards\n"
 
         "\n<b>⚠️ Important:</b>\n"
@@ -136,7 +137,7 @@ def start_menu_keyboard() -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton(
                     "📢 Update Channel",
-                    url=REQUIRED_CHANNELS[0][1],
+                    url=REQUIRED_CHANNELS[1][1],
                     style=ButtonStyle.PRIMARY,
                 ),
                 InlineKeyboardButton(
@@ -312,6 +313,122 @@ def json_message(data: Any) -> str:
     return "```json\n" + format_result(data) + "\n```"
 
 
+RESULT_ALIASES = {
+    "name": {"name", "fullname", "personname"},
+    "father": {"father", "fathername", "fname", "fathersname", "father_name"},
+    "address": {"address", "fulladdress", "completeaddress"},
+    "circle": {"circle", "telecomcircle", "operatorcircle"},
+    "email": {"email", "emailaddress", "mail"},
+    "aadhar": {"aadhar", "aadhaar", "aadharno", "aadhaarno", "uid", "uidai"},
+    "alternate": {"alt", "alternate", "alternatenumber", "alternatenumbers"},
+    "number": {"num", "number", "mobile", "mobilenumber", "phone", "phonenumber"},
+}
+
+
+def normalized_key(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(value).lower())
+
+
+def scalar_value(value: Any) -> str | None:
+    if isinstance(value, (str, int, float)) and str(value).strip():
+        return str(value).strip()
+    return None
+
+
+def field_value(record: Any, field: str) -> str | None:
+    aliases = {normalized_key(alias) for alias in RESULT_ALIASES[field]}
+    if isinstance(record, dict):
+        for key, value in record.items():
+            if normalized_key(key) in aliases:
+                found = scalar_value(value)
+                if found:
+                    return found
+        for value in record.values():
+            found = field_value(value, field)
+            if found:
+                return found
+    elif isinstance(record, list):
+        for value in record:
+            found = field_value(value, field)
+            if found:
+                return found
+    return None
+
+
+def looks_like_result(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    keys = {normalized_key(key) for key in value}
+    result_keys = {
+        normalized_key(alias)
+        for aliases in RESULT_ALIASES.values()
+        for alias in aliases
+    }
+    return bool(keys & result_keys)
+
+
+def result_records(value: Any) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    if isinstance(value, dict):
+        if looks_like_result(value):
+            records.append(value)
+        else:
+            for child in value.values():
+                records.extend(result_records(child))
+    elif isinstance(value, list):
+        for child in value:
+            records.extend(result_records(child))
+    return records
+
+
+def format_lookup_record(record: dict[str, Any], query: str, command: str) -> str:
+    number = field_value(record, "number") or (query if command == "num" else "Not found")
+
+    def text(field: str, fallback: str = "Not found") -> str:
+        return html.escape(field_value(record, field) or fallback)
+
+    lines = [
+        f"👤 Name: {text('name')}",
+        f"👨‍👦 Father: {text('father')}",
+        f"📍 Address: {text('address')}",
+        f"📡 Circle: {text('circle')}",
+    ]
+    email = field_value(record, "email")
+    aadhar = field_value(record, "aadhar")
+    alternate = field_value(record, "alternate")
+    if email:
+        lines.append(f"📧 Email: {html.escape(email)}")
+    if aadhar:
+        lines.append(f"🆔 Aadhar: {html.escape(aadhar)}")
+    if alternate:
+        lines.append(f"📞 Alternate: {html.escape(alternate)}")
+    lines.append(f"📱 Number: {html.escape(number)}")
+    return "\n".join(lines)
+
+
+def lookup_message_chunks(query: str, data: Any, command: str) -> list[str]:
+    records = result_records(data)
+    if not records and isinstance(data, dict):
+        records = [data]
+    title = "📱 NUMBER SEARCH RESULTS" if command == "num" else "🆔 AADHAR SEARCH RESULTS"
+    chunks: list[str] = []
+    current: list[str] = []
+    for index, record in enumerate(records, start=1):
+        block = f"📌 Result #{index}\n{format_lookup_record(record, query, command)}"
+        if current and (len(current) >= 5 or len("\n───────────────────────────────────\n".join(current + [block])) + len(title) + 20 > 4096):
+            chunks.append(f"🔍 {title}\n═══════════════════════════════════\n\n" + "\n───────────────────────────────────\n".join(current))
+            current = []
+        current.append(block)
+    if current:
+        chunks.append(f"🔍 {title}\n═══════════════════════════════════\n\n" + "\n───────────────────────────────────\n".join(current))
+    return chunks
+
+
+def normalise_aadhaar(value: str) -> str | None:
+    digits = re.sub(r"\D", "", value)
+    return digits if len(digits) == 12 else None
+
+
 def normalise_phone_number(value: str) -> str | None:
     """Return the 10-digit Indian mobile number expected by the configured API."""
     digits = re.sub(r"[\s-]", "", value)
@@ -391,42 +508,28 @@ async def lookup_number(_: Client, message: Message) -> None:
         await message.reply_text("Usage: /num <10-digit mobile number>")
         return
 
-    first_api = os.getenv("NUM_TO_INFO", "").strip()
-    second_api = os.getenv("AADHAR_TO_INFO", "").strip()
-    if not first_api:
+    api_template = os.getenv("NUM_TO_INFO", "").strip()
+    if not api_template:
         await message.reply_text("The number lookup API is not configured.")
         return
 
     has_credit = await asyncio.to_thread(osint_bot.consume_credit, message.from_user.id)
     if not has_credit:
-        await message.reply_text("<b><i>Contact the administrator to add credits to your account before using this command.\n\n Admin Contact: @its_aadish or @GodUHappy</b></i>")
+        await message.reply_text("<b><i>Contact the admin to add credits to your account before using this command.\n\n Admin Contact: @its_aadish or @GodUHappy</b></i>")
         return
 
     loading_message = await message.reply_text("Fetching the number information…")
     try:
         async with httpx.AsyncClient(timeout=15, follow_redirects=False) as client:
-            first_url = build_api_url(first_api, "NUMBER", number, "number")
-            first_response = await client.get(first_url)
-            first_response.raise_for_status()
-            first_data = first_response.json()
-            error_message = api_error_message(first_data)
+            url = build_api_url(api_template, "NUMBER", number, "number")
+            response = await client.get(url)
+            response.raise_for_status()
+            data = response.json()
+            error_message = api_error_message(data)
             if error_message:
                 await remove_loading_message(loading_message)
                 await message.reply_text(error_message)
                 return
-
-            second_data = {}
-            if second_api:
-                aadhaar = find_aadhaar(first_data)
-                if aadhaar:
-                    try:
-                        second_url = build_api_url(second_api, "AADHAR", aadhaar, "aadhar")
-                        second_response = await client.get(second_url)
-                        second_response.raise_for_status()
-                        second_data = second_response.json()
-                    except (httpx.HTTPError, ValueError, KeyError) as error:
-                        LOGGER.warning("Aadhaar lookup failed; using number-only data. Error: %s", type(error).__name__)
-                        second_data = {}
     except httpx.HTTPStatusError as error:
         LOGGER.warning("Number API returned HTTP %s", error.response.status_code)
         await remove_loading_message(loading_message)
@@ -438,23 +541,78 @@ async def lookup_number(_: Client, message: Message) -> None:
         await message.reply_text("Lookup failed. Please try again later.")
         return
 
-    combined_data = combine_lookup_results(first_data, second_data)
-    if is_no_result_payload(first_data):
+    if is_no_result_payload(data):
         await remove_loading_message(loading_message)
         await message.reply_text("**No result found**")
         return
-    if not combined_data:
+    chunks = lookup_message_chunks(number, data, "num")
+    if not chunks:
         await remove_loading_message(loading_message)
         await message.reply_text("**No result found**")
         return
 
-    result_text = json_message(combined_data)
     await remove_loading_message(loading_message)
-    if len(result_text) > 4096:
-        await message.reply_document(result_file(combined_data, "lookup-result.txt"))
+    for chunk in chunks:
+        await message.reply_text(chunk)
+
+
+@app.on_message(filters.command("aadhar") & filters.private)
+async def lookup_aadhar(_: Client, message: Message) -> None:
+    if not message.from_user:
         return
 
-    await message.reply_text(result_text)
+    missing_channels = await missing_required_channels(message.from_user.id)
+    if missing_channels:
+        await message.reply_text(JOIN_TEXT, reply_markup=join_keyboard(missing_channels))
+        return
+
+    await asyncio.to_thread(osint_bot.register_user, message.from_user)
+    parts = message.text.split(maxsplit=1) if message.text else []
+    aadhar = normalise_aadhaar(parts[1]) if len(parts) == 2 else None
+    if not aadhar:
+        await message.reply_text("Usage: /aadhar <12-digit Aadhaar number>")
+        return
+
+    api_template = os.getenv("AADHAR_TO_INFO", "").strip()
+    if not api_template:
+        await message.reply_text("The Aadhaar lookup API is not configured.")
+        return
+
+    has_credit = await asyncio.to_thread(osint_bot.consume_credit, message.from_user.id)
+    if not has_credit:
+        await message.reply_text("<b><i>Contact the admin to add credits to your account before using this command.\n\n Admin Contact: @its_aadish or @GodUHappy</b></i>")
+        return
+
+    loading_message = await message.reply_text("Fetching the Aadhaar information…")
+    try:
+        async with httpx.AsyncClient(timeout=15, follow_redirects=False) as client:
+            url = build_api_url(api_template, "AADHAR", aadhar, "aadhar")
+            response = await client.get(url)
+            response.raise_for_status()
+            data = response.json()
+            error_message = api_error_message(data)
+            if error_message:
+                await remove_loading_message(loading_message)
+                await message.reply_text(error_message)
+                return
+    except httpx.HTTPStatusError as error:
+        LOGGER.warning("Aadhaar API returned HTTP %s", error.response.status_code)
+        await remove_loading_message(loading_message)
+        await message.reply_text("The lookup service rejected the request. Please try again later.")
+        return
+    except (httpx.HTTPError, ValueError, KeyError, json.JSONDecodeError) as error:
+        LOGGER.warning("Aadhaar lookup failed: %s", type(error).__name__)
+        await remove_loading_message(loading_message)
+        await message.reply_text("Lookup failed. Please try again later.")
+        return
+
+    chunks = lookup_message_chunks(aadhar, data, "aadhar")
+    await remove_loading_message(loading_message)
+    if not chunks:
+        await message.reply_text("**No result found**")
+        return
+    for chunk in chunks:
+        await message.reply_text(chunk)
 
 
 @app.on_message(filters.command("refer") & filters.private)
